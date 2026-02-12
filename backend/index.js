@@ -30,8 +30,16 @@ const app = express();
 app.use(express.json());
 
 // Allow CORS from frontend (e.g., Vercel) or default to all for local dev.
-const FRONTEND_URL = process.env.FRONTEND_URL || "*";
-app.use(cors({ origin: FRONTEND_URL }));
+const FRONTEND_URL =
+  process.env.FRONTEND_URL || "https://webrtc-calling-app-six.vercel.app";
+
+app.use(
+  cors({
+    origin: FRONTEND_URL,
+    methods: ["GET", "POST"],
+    credentials: true
+  })
+);
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
@@ -39,7 +47,8 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: FRONTEND_URL,
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
@@ -108,7 +117,7 @@ io.on("connection", (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`Signaling server listening on port ${PORT}`);
   console.log(`Allowed frontend origin: ${FRONTEND_URL}`);
