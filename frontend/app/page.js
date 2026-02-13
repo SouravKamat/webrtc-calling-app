@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import io from "socket.io-client";
-
-let socket = null;
+import socket from "../lib/socket";
 
 export default function Page() {
   const [joined, setJoined] = useState(false);
@@ -20,180 +18,170 @@ export default function Page() {
   const videoEnabledRef = useRef(false);
 
   const rtcConfig = {
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" }
-      // Optional TURN server example:
-      // { urls: "turn:your.turn.server:3478", username: "u", credential: "p" }
-    ]
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   };
 
-  function initSocket() {
-    if (socket) return;
-    const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
-    socket = io(BACKEND);
+  // ---------------- SOCKET (attach listeners) ----------------
+  useEffect(() => {
+    if (!socket) return;
 
-    socket.on("connect", () => {
+    const onConnect = () => {
+      console.log("✅ connected:", socket.id);
       setMySocketId(socket.id);
-    });
+    };
 
-    socket.on("users", (list) => {
-      setUsers(list.filter((u) => u.socketId !== socket.id));
-    });
+    const onJoinedRoom = ({ roomId, participants }) => {
+      setUsers(participants.filter((u) => u.socketId !== socket.id));
+    };
 
-    socket.on("incoming-call", (data) => {
-      setIncomingCall(data);
-    });
+    const onUserJoined = ({ socketId, username }) => {
+      setUsers((prev) => [...prev, { socketId, username }]);
+    };
 
-    socket.on("call-accepted", async ({ from, answer }) => {
-      if (!pcRef.current) return;
-      try {
-        await pcRef.current.setRemoteDescription(answer);
-        setInCallWith(from);
-      } catch (err) {
-        console.error("Error applying remote answer:", err);
-      }
-    });
-
-    socket.on("call-rejected", ({ from }) => {
-      alert("Call rejected by user.");
-      cleanupCall();
-    });
-
-    socket.on("ice-candidate", async ({ from, candidate }) => {
-      if (pcRef.current && candidate) {
-        try {
-          await pcRef.current.addIceCandidate(candidate);
-        } catch (err) {
-          console.warn("Failed to add ICE candidate:", err);
-        }
-      }
-    });
-
-    socket.on("call-ended", ({ from }) => {
-      alert("Call ended by remote.");
-      cleanupCall();
-    });
-
-    socket.on("user-disconnected", ({ socketId }) => {
+    const onUserLeft = ({ socketId }) => {
+      setUsers((prev) => prev.filter((u) => u.socketId !== socketId));
       if (inCallWith === socketId) {
-        alert("Peer disconnected.");
+        alert("Peer disconnected");
         cleanupCall();
       }
-    });
-  }
+    };
 
+    const onOffer = (data) => {
+      const { from, offer } = data;
+      setIncomingCall({ from, offer });
+    };
+
+    const onAnswer = async ({ from, answer }) => {
+      if (!pcRef.current) return;
+      await pcRef.current.setRemoteDescription(answer);
+      setInCallWith(from);
+    };
+
+    const onIce = async ({ from, candidate }) => {
+      if (pcRef.current && candidate) {
+        await pcRef.current.addIceCandidate(candidate);
+      }
+    };
+
+    const onConnectError = (err) => {
+      console.error("❌ socket error:", err.message);
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("joined-room", onJoinedRoom);
+    socket.on("user-joined", onUserJoined);
+    socket.on("user-left", onUserLeft);
+    socket.on("offer", onOffer);
+    socket.on("answer", onAnswer);
+    socket.on("ice-candidate", onIce);
+    socket.on("connect_error", onConnectError);
+
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("joined-room", onJoinedRoom);
+      socket.off("user-joined", onUserJoined);
+      socket.off("user-left", onUserLeft);
+      socket.off("offer", onOffer);
+      socket.off("answer", onAnswer);
+      socket.off("ice-candidate", onIce);
+      socket.off("connect_error", onConnectError);
+    };
+  }, []);
+
+  // ---------------- JOIN ----------------
   function handleJoin(e) {
     e.preventDefault();
     if (!username) return;
-    initSocket();
-    socket.emit("join", { username });
+
+    // Use a single global room for discovery; replace with dynamic rooms as needed
+    const ROOM_ID = "global";
+    socket.emit("join-room", { roomId: ROOM_ID, username });
     setJoined(true);
   }
 
-  async function getLocalMedia({ audio = true, video = false } = {}) {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio, video });
-      localStreamRef.current = stream;
-      return stream;
-    } catch (err) {
-      console.error("getUserMedia error:", err);
-      throw err;
-    }
+  // ---------------- MEDIA ----------------
+  async function getLocalMedia({ audio = true, video = false }) {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio, video });
+    localStreamRef.current = stream;
+    return stream;
   }
 
-  function createPeerConnection(peerSocketId) {
+  function createPeerConnection(peerId) {
     const pc = new RTCPeerConnection(rtcConfig);
     pcRef.current = pc;
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate && socket) {
-        socket.emit("ice-candidate", { to: peerSocketId, candidate: event.candidate });
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        socket.emit("ice-candidate", {
+          to: peerId,
+          candidate: e.candidate,
+        });
       }
     };
 
     const remoteStream = new MediaStream();
     remoteStreamRef.current = remoteStream;
-    pc.ontrack = (event) => {
-      event.streams?.[0] && event.streams[0].getTracks().forEach((t) => remoteStream.addTrack(t));
+
+    pc.ontrack = (e) => {
+      e.streams[0].getTracks().forEach((t) => remoteStream.addTrack(t));
     };
 
     return pc;
   }
 
-  async function callUser(targetSocketId) {
-    if (!targetSocketId) return;
-    try {
-      await getLocalMedia({ audio: true, video: videoEnabledRef.current });
-      const pc = createPeerConnection(targetSocketId);
+  // ---------------- CALL ----------------
+  async function callUser(peerId) {
+    await getLocalMedia({ audio: true, video: videoEnabledRef.current });
+    const pc = createPeerConnection(peerId);
 
-      localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current));
+    localStreamRef.current.getTracks().forEach((t) =>
+      pc.addTrack(t, localStreamRef.current)
+    );
 
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-      socket.emit("call-user", { to: targetSocketId, offer: pc.localDescription });
-    } catch (err) {
-      console.error("callUser error:", err);
-    }
+    socket.emit("offer", { to: peerId, offer: pc.localDescription });
   }
 
   async function acceptCall() {
-    if (!incomingCall) return;
     const { from, offer } = incomingCall;
-    try {
-      await getLocalMedia({ audio: true, video: videoEnabledRef.current });
-      const pc = createPeerConnection(from);
 
-      localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current));
+    await getLocalMedia({ audio: true, video: videoEnabledRef.current });
+    const pc = createPeerConnection(from);
 
-      await pc.setRemoteDescription(offer);
+    localStreamRef.current.getTracks().forEach((t) =>
+      pc.addTrack(t, localStreamRef.current)
+    );
 
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
+    await pc.setRemoteDescription(offer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
 
-      socket.emit("accept-call", { to: from, answer: pc.localDescription });
+    socket.emit("answer", { to: from, answer: pc.localDescription });
 
-      setInCallWith(from);
-      setIncomingCall(null);
-    } catch (err) {
-      console.error("acceptCall error:", err);
-    }
+    setIncomingCall(null);
+    setInCallWith(from);
   }
 
   function rejectCall() {
-    if (!incomingCall) return;
-    socket.emit("reject-call", { to: incomingCall.from });
+    socket.emit("leave-room");
     setIncomingCall(null);
   }
 
   function endCall() {
-    if (inCallWith && socket) {
-      socket.emit("end-call", { to: inCallWith });
-    }
+    // Notify others in room that we left (optional)
+    socket.emit("leave-room");
     cleanupCall();
   }
 
   function cleanupCall() {
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
-      localStreamRef.current = null;
-    }
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    pcRef.current?.close();
 
-    if (remoteStreamRef.current) {
-      try {
-        remoteStreamRef.current.getTracks().forEach((t) => t.stop());
-      } catch (e) {}
-      remoteStreamRef.current = null;
-    }
-
-    if (pcRef.current) {
-      try {
-        pcRef.current.ontrack = null;
-        pcRef.current.onicecandidate = null;
-        pcRef.current.close();
-      } catch (e) {}
-      pcRef.current = null;
-    }
+    localStreamRef.current = null;
+    remoteStreamRef.current = null;
+    pcRef.current = null;
 
     setInCallWith(null);
     setIncomingCall(null);
@@ -201,117 +189,98 @@ export default function Page() {
 
   function toggleVideo() {
     videoEnabledRef.current = !videoEnabledRef.current;
-    alert("Video for future calls: " + (videoEnabledRef.current ? "ON" : "OFF"));
+    alert(`Video ${videoEnabledRef.current ? "ON" : "OFF"} for next call`);
   }
 
   function toggleMute() {
-    if (!localStreamRef.current) return;
-    localStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
+    localStreamRef.current?.getAudioTracks().forEach(
+      (t) => (t.enabled = !t.enabled)
+    );
   }
 
-  useEffect(() => {
-    const localEl = document.getElementById("localVideo");
-    const remoteEl = document.getElementById("remoteVideo");
-
-    if (localEl && localStreamRef.current) {
-      localEl.srcObject = localStreamRef.current;
-    }
-    if (remoteEl && remoteStreamRef.current) {
-      remoteEl.srcObject = remoteStreamRef.current;
-    }
-  });
-
+  // ---------------- CLEANUP ----------------
   useEffect(() => {
     return () => {
-      if (socket) {
-        socket.disconnect();
-        socket = null;
-      }
+      socket?.disconnect();
+      socket = null;
     };
   }, []);
 
+  // ---------------- UI ----------------
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">Private 1:1 Calling (WebRTC)</h1>
+      <h1 className="text-2xl font-semibold">WebRTC 1:1 Calling</h1>
 
       {!joined ? (
         <form onSubmit={handleJoin} className="flex gap-2">
           <input
             className="border p-2 rounded flex-1"
-            placeholder="Enter username"
+            placeholder="Username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
           />
-          <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded">Join</button>
+          <button className="bg-blue-600 text-white px-4 rounded">Join</button>
         </form>
       ) : (
         <div className="flex gap-6">
           <div className="w-1/3 bg-white p-4 rounded shadow">
             <div className="mb-2">
-              <strong>You:</strong> {username} <br />
-              <small>Socket: {mySocketId}</small>
+              <strong>{username}</strong>
+              <br />
+              <small>{mySocketId}</small>
             </div>
 
-            <div className="mb-2">
-              <button onClick={toggleVideo} className="text-sm underline">Toggle Video for future calls</button>
-            </div>
+            <button onClick={toggleVideo} className="underline text-sm">
+              Toggle Video
+            </button>
 
-            <h3 className="font-medium">Online Users</h3>
-            <ul className="space-y-2 mt-2">
-              {users.length === 0 && <li className="text-sm text-gray-500">No one online</li>}
+            <ul className="mt-4 space-y-2">
               {users.map((u) => (
-                <li key={u.socketId} className="flex justify-between items-center">
-                  <span>{u.username}</span>
-                  <div className="space-x-2">
-                    <button
-                      className="bg-green-500 text-white px-2 py-1 rounded text-sm"
-                      onClick={() => callUser(u.socketId)}
-                    >
-                      Call
-                    </button>
-                  </div>
+                <li key={u.socketId} className="flex justify-between">
+                  {u.username}
+                  <button
+                    onClick={() => callUser(u.socketId)}
+                    className="bg-green-500 text-white px-2 rounded"
+                  >
+                    Call
+                  </button>
                 </li>
               ))}
             </ul>
           </div>
 
           <div className="flex-1 bg-white p-4 rounded shadow">
-            <h3 className="font-medium mb-2">Call Area</h3>
-
             {incomingCall && (
-              <div className="mb-4 p-3 border rounded bg-yellow-50">
-                <div><strong>{incomingCall.callerName}</strong> is calling you.</div>
-                <div className="mt-2 space-x-2">
-                  <button onClick={acceptCall} className="bg-blue-600 text-white px-3 py-1 rounded">Accept</button>
-                  <button onClick={rejectCall} className="bg-gray-200 px-3 py-1 rounded">Reject</button>
+              <div className="mb-3">
+                <strong>{users.find((u) => u.socketId === incomingCall.from)?.username || incomingCall.from}</strong> calling
+                <div className="space-x-2 mt-2">
+                  <button onClick={acceptCall} className="bg-blue-600 text-white px-3 rounded">
+                    Accept
+                  </button>
+                  <button onClick={rejectCall} className="bg-gray-300 px-3 rounded">
+                    Reject
+                  </button>
                 </div>
               </div>
             )}
 
             {inCallWith ? (
-              <div className="space-y-3">
-                <div className="flex gap-3">
-                  <div>
-                    <div className="text-sm text-gray-500">Local</div>
-                    <video id="localVideo" autoPlay muted playsInline className="w-48 h-36 bg-black" />
-                  </div>
-                  <div>
-                    <div className="text-sm text-gray-500">Remote</div>
-                    <video id="remoteVideo" autoPlay playsInline className="w-48 h-36 bg-black" />
-                  </div>
+              <>
+                <video autoPlay muted ref={(v) => v && (v.srcObject = localStreamRef.current)} />
+                <video autoPlay ref={(v) => v && (v.srcObject = remoteStreamRef.current)} />
+                <div className="space-x-2 mt-2">
+                  <button onClick={toggleMute}>Mute</button>
+                  <button onClick={endCall} className="bg-red-600 text-white px-3 rounded">
+                    End
+                  </button>
                 </div>
-
-                <div className="space-x-2">
-                  <button onClick={toggleMute} className="bg-yellow-400 px-3 py-1 rounded">Mute/Unmute</button>
-                  <button onClick={endCall} className="bg-red-600 text-white px-3 py-1 rounded">End Call</button>
-                </div>
-              </div>
+              </>
             ) : (
-              <div className="text-sm text-gray-500">Not in a call</div>
+              <p>Not in a call</p>
             )}
           </div>
         </div>
-      )}
-    </div>
-  );
-}
+        )}
+      </div>
+    );
+  }
