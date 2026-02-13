@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import socket from "../lib/socket";
+import { initSocket, getSocket, disconnectSocket } from "../lib/socket";
 
 export default function Page() {
   const [joined, setJoined] = useState(false);
@@ -23,11 +23,13 @@ export default function Page() {
 
   // ---------------- SOCKET (attach listeners) ----------------
   useEffect(() => {
-    if (!socket) return;
+    initSocket();
+    const s = getSocket();
+    if (!s) return;
 
     const onConnect = () => {
-      console.log("✅ connected:", socket.id);
-      setMySocketId(socket.id);
+      console.log("✅ connected:", s.id);
+      setMySocketId(s.id);
     };
 
     const onJoinedRoom = ({ roomId, participants }) => {
@@ -67,24 +69,24 @@ export default function Page() {
       console.error("❌ socket error:", err.message);
     };
 
-    socket.on("connect", onConnect);
-    socket.on("joined-room", onJoinedRoom);
-    socket.on("user-joined", onUserJoined);
-    socket.on("user-left", onUserLeft);
-    socket.on("offer", onOffer);
-    socket.on("answer", onAnswer);
-    socket.on("ice-candidate", onIce);
-    socket.on("connect_error", onConnectError);
+    s.on("connect", onConnect);
+    s.on("joined-room", onJoinedRoom);
+    s.on("user-joined", onUserJoined);
+    s.on("user-left", onUserLeft);
+    s.on("offer", onOffer);
+    s.on("answer", onAnswer);
+    s.on("ice-candidate", onIce);
+    s.on("connect_error", onConnectError);
 
     return () => {
-      socket.off("connect", onConnect);
-      socket.off("joined-room", onJoinedRoom);
-      socket.off("user-joined", onUserJoined);
-      socket.off("user-left", onUserLeft);
-      socket.off("offer", onOffer);
-      socket.off("answer", onAnswer);
-      socket.off("ice-candidate", onIce);
-      socket.off("connect_error", onConnectError);
+      s.off("connect", onConnect);
+      s.off("joined-room", onJoinedRoom);
+      s.off("user-joined", onUserJoined);
+      s.off("user-left", onUserLeft);
+      s.off("offer", onOffer);
+      s.off("answer", onAnswer);
+      s.off("ice-candidate", onIce);
+      s.off("connect_error", onConnectError);
     };
   }, []);
 
@@ -95,7 +97,8 @@ export default function Page() {
 
     // Use a single global room for discovery; replace with dynamic rooms as needed
     const ROOM_ID = "global";
-    socket.emit("join-room", { roomId: ROOM_ID, username });
+    initSocket();
+    getSocket()?.emit("join-room", { roomId: ROOM_ID, username });
     setJoined(true);
   }
 
@@ -112,7 +115,7 @@ export default function Page() {
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        socket.emit("ice-candidate", {
+        getSocket()?.emit("ice-candidate", {
           to: peerId,
           candidate: e.candidate,
         });
@@ -141,7 +144,7 @@ export default function Page() {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    socket.emit("offer", { to: peerId, offer: pc.localDescription });
+    getSocket()?.emit("offer", { to: peerId, offer: pc.localDescription });
   }
 
   async function acceptCall() {
@@ -158,20 +161,20 @@ export default function Page() {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
-    socket.emit("answer", { to: from, answer: pc.localDescription });
+    getSocket()?.emit("answer", { to: from, answer: pc.localDescription });
 
     setIncomingCall(null);
     setInCallWith(from);
   }
 
   function rejectCall() {
-    socket.emit("leave-room");
+    getSocket()?.emit("leave-room");
     setIncomingCall(null);
   }
 
   function endCall() {
     // Notify others in room that we left (optional)
-    socket.emit("leave-room");
+    getSocket()?.emit("leave-room");
     cleanupCall();
   }
 
@@ -201,8 +204,7 @@ export default function Page() {
   // ---------------- CLEANUP ----------------
   useEffect(() => {
     return () => {
-      socket?.disconnect();
-      socket = null;
+      disconnectSocket();
     };
   }, []);
 
